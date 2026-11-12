@@ -75,6 +75,7 @@ NO_CACHE = {"Cache-Control": "no-store"}
 app = FastAPI(title="P5R Audio Lab")
 
 
+
 from fastapi.responses import JSONResponse  # noqa: E402
 
 
@@ -210,20 +211,29 @@ def source_cache(bank: str) -> Path:
     return CACHE / bank / key
 
 
+_meta_mem: dict[str, list[dict]] = {}
+
+
 def bank_meta(bank: str) -> list[dict]:
-    """Infos de tous les clips (nom du cue, durée...). Un seul appel à vgmstream, puis cache disque."""
+    """Infos de tous les clips (nom du cue, durée...). Un seul appel à vgmstream, puis cache disque et mémoire."""
     cache = source_cache(bank) / "meta.json"
+    key = str(cache)
+    if key in _meta_mem:
+        return _meta_mem[key]
     if cache.exists():
-        return json.loads(cache.read_text("utf-8"))
+        _meta_mem[key] = json.loads(cache.read_text("utf-8"))
+        return _meta_mem[key]
     with bank_lock(bank):
         if cache.exists():
-            return json.loads(cache.read_text("utf-8"))
+            _meta_mem[key] = json.loads(cache.read_text("utf-8"))
+            return _meta_mem[key]
         path = awb_path(bank)
         entries = awb.read_awb(path)
         infos = tools.probe_all(path)
         clips = [{**e, **(infos[i] if i < len(infos) else {})} for i, e in enumerate(entries)]
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(clips), "utf-8")
+        _meta_mem[key] = clips
         return clips
 
 
@@ -467,9 +477,40 @@ def api_apply_update():
         res = updater.apply()
     except Exception as e:
         raise HTTPException(500, f"Mise à jour impossible : {e}")
-    # Code 3 = « redémarre-moi » : start.bat relance l'outil tout seul
-    threading.Timer(0.8, lambda: os._exit(3)).start()
+    threading.Timer(0.8, restart_tool).start()
     return res
+
+
+def _parent_pid(pid: int) -> tuple[int, str]:
+    out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                          f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; \"$($p.ParentProcessId) $($p.Name)\""],
+                         capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    parts = out.stdout.decode("cp850", "ignore").strip().split(" ", 1)
+    try:
+        return int(parts[0]), parts[1] if len(parts) > 1 else ""
+    except ValueError:
+        return 0, ""
+
+
+def restart_tool() -> None:
+    """Après une mise à jour : relance start.bat dans une nouvelle fenêtre et ferme l'ancienne.
+
+    On ne laisse pas l'ancienne fenêtre continuer à lire start.bat : s'il a été remplacé par la mise à jour,
+    Windows lirait la suite du nouveau fichier au mauvais endroit.
+    """
+    env = dict(os.environ, P5R_NO_BROWSER="1", P5R_RESTART="1")
+    subprocess.Popen(["cmd", "/c", "start", "P5R FR Audio Lab", "cmd", "/c", str(ROOT / "start.bat")],
+                     cwd=str(ROOT), env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # Retrouve la fenêtre (cmd.exe) qui a lancé l'outil et la ferme
+    pid = os.getpid()
+    for _ in range(4):
+        pid, name = _parent_pid(pid)
+        if not pid:
+            break
+        if name.lower() == "cmd.exe":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+            break
+    os._exit(0)
 
 
 @app.get("/api/whoami")
@@ -620,7 +661,8 @@ def clips(bank: str):
         vf = vfs.get(c["index"])
         vf_dur = tools.adx_duration(d / vf) if vf else 0
         sg = sugg.get(str(c["index"]))
-        out.append({**c, "en": en.get(f"{c['index']}.wav", ""), "text": n.get("text", ""), "valid": bool(n.get("valid")) and bool(vf), "vf": vf, "vf_duration": vf_dur,
+        out.append({"index": c["index"], "name": c.get("name"), "duration": c.get("duration", 0),
+                    "en": en.get(f"{c['index']}.wav", ""), "text": n.get("text", ""), "valid": bool(n.get("valid")) and bool(vf), "vf": vf, "vf_duration": vf_dur,
                     "suggest": {"file": Path(sg["file"]).name, "fr": sg.get("fr", ""), "sure": sg.get("sure", True)}
                     if sg and not vf and Path(sg["file"]).exists() else None})
     warm_bank(bank)
@@ -827,6 +869,22 @@ def patch_note(bank: str, index: int, body: NoteIn):
     return n
 
 
+def parse_rec_name(p: Path, bank: str, all_banks: list[str]) -> int | None:
+    """Numéro de clip d'un enregistrement pour ce perso : BP01_118_Cue.wav, BP01-118.wav ou BP01/118.wav."""
+    stem = p.stem.upper()
+    # Le nom de perso le plus long qui correspond (BP09_01 avant BP09)
+    owner = max((b for b in all_banks if stem.startswith(b.upper())), key=len, default=None)
+    if owner:
+        if owner.upper() != bank.upper():
+            return None
+        m = re.match(r"[_\- #]*(\d+)", stem[len(owner):])
+        return int(m.group(1)) if m else None
+    if p.parent.name.upper() == bank.upper():
+        m = re.match(r"(\d+)", stem)
+        return int(m.group(1)) if m else None
+    return None
+
+
 @app.post("/api/banks/{bank}/batch")
 def batch(bank: str):
     """Importe tous les enregistrements nommés BP01_118.wav ou rangés dans BP01/118.wav."""
@@ -836,14 +894,13 @@ def batch(bank: str):
     if not rec_dir or not rec.is_dir():
         raise HTTPException(400, "Choisis d'abord le dossier des enregistrements VF dans les réglages.")
     found: dict[int, Path] = {}
+    all_banks = [b["bank"] for b in banks()]
     for p in rec.rglob("*"):
         if p.suffix.lower() not in AUDIO_EXT:
             continue
-        m = re.match(rf"{bank}[_\- #]*(\d+)", p.stem, re.I)
-        if not m and p.parent.name.upper() == bank:
-            m = re.match(r"(\d+)", p.stem)
-        if m:
-            found[int(m.group(1))] = p
+        idx = parse_rec_name(p, bank, all_banks)
+        if idx is not None:
+            found[idx] = p
     done, errors = [], []
     for idx, p in sorted(found.items()):
         try:
@@ -875,6 +932,12 @@ if __name__ == "__main__":
         with socket.socket() as sk:
             return sk.connect_ex(("127.0.0.1", PORT)) == 0
 
+    if os.environ.get("P5R_RESTART"):
+        # Redémarrage après mise à jour : on attend que l'ancienne version ait libéré la place
+        for _ in range(60):
+            if not port_busy():
+                break
+            time.sleep(0.25)
     if port_busy():
         try:
             other = json.load(urllib.request.urlopen(url + "/api/whoami", timeout=3))["root"]
@@ -882,7 +945,8 @@ if __name__ == "__main__":
             other = "une ancienne version"
         if Path(other) == ROOT:
             # Cette copie tourne déjà : on ouvre juste la page
-            webbrowser.open(url)
+            if not os.environ.get("P5R_NO_BROWSER"):
+                webbrowser.open(url)
             raise SystemExit
         # Une autre copie de l'outil occupe la place : on la ferme pour que tout aille dans CE dossier
         print(f"  Une autre copie de l'outil tournait ({other}) : elle est fermée.", flush=True)
