@@ -1,0 +1,17 @@
+# Créés sur le PC de chacun au premier lancement
+data/
+mod/
+tools/
+
+# Développement
+web/node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Scripts de transcription (optionnels, non utilisés par l'outil)
+server/transcribe.py
+server/transcribe_all.py
+
+# Sauvegardes locales
+_sauvegarde*/
