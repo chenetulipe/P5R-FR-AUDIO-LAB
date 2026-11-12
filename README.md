@@ -20,13 +20,14 @@ L'outil s'ouvre dans le navigateur (http://127.0.0.1:8005). Garde la fenêtre no
 
 ## Mises à jour
 
-Quand une nouvelle version est publiée dans les **Releases** du dépôt, un bouton **« Nouvelle version »** apparaît en haut de l'outil. Un clic l'installe et redémarre l'outil. Les réglages, les voix extraites et le mod sont gardés.
+Quand une nouvelle version est publiée dans les **Releases** du dépôt, un bouton **« Nouvelle version »** apparaît en haut de l'outil. On peut aussi vérifier à la main dans **Réglages → Mises à jour**. Un clic l'installe et redémarre l'outil. Les réglages, les voix extraites et le mod sont gardés.
 
 ## Poser une VF
 
 - **Une par une :** glisser un fichier audio (WAV, MP3, FLAC, OGG) sur une ligne, ou cliquer « Déposer un fichier ».
 - **Export groupé :** toutes les VO d'un perso dans un zip (`BP01_3_Cue3001.wav`…) avec une liste CSV. Si les comédiens gardent ces noms pour leurs enregistrements, l'import se fait en un clic.
 - **Import groupé :** dans Réglages, choisir le dossier des enregistrements VF. Les fichiers doivent commencer par `BP01_118` (perso puis numéro du clip), ou être rangés comme `BP01/118.wav`.
+- **Plusieurs fichiers d'un coup :** glisser plusieurs fichiers sur la liste. Chacun est rangé d'après son nom (`BP01_118.wav`, `bp01-118.wav`…), même pour d'autres persos.
 - **Télécharger une réplique :** l'icône tout à droite de la ligne.
 
 À chaque fichier, l'outil coupe les silences au début et à la fin, cale le volume sur la VO, convertit au format de l'original et l'encode en ADX chiffré pour P5R. La durée de la VF s'affiche, en orange si elle est nettement plus longue que la VO.
@@ -55,5 +56,7 @@ Si Reloaded-II affiche « IP relative memory operand is too far away » au lance
 - `tests/` : tests de bout en bout sur les vraies voix (`py -3 -m pip install pytest httpx` puis `py -3 -m pytest tests -q`). Ils utilisent un dossier temporaire et ne touchent ni au mod ni à Reloaded-II.
 
 Pour publier une version : changer le numéro dans `VERSION`, puis créer une Release GitHub avec le tag correspondant (par exemple `v1.1.0`).
+
+À partir de la 1.1.0, l'outil redémarre après une mise à jour dans une nouvelle fenêtre : `start.bat` peut donc être modifié sans risque. Une copie en 1.0.0 relance au contraire le `start.bat` en cours : pour qu'elle se mette à jour proprement, la version suivante doit garder un `start.bat` identique (c'est le cas de la 1.1.0).
 
 Dans `SOUND/BATTLE` : `BP01` à `BP10` (pas de `BP08`) sont les persos jouables, `BP09_01` une deuxième série pour Crow, `SPT01`/`SPT02`/`SPT04` les navigatrices.

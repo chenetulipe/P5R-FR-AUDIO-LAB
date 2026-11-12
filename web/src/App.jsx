@@ -76,7 +76,12 @@ const Row = memo(function Row({ clip, pos, selected, playing, busy, recent, act 
       onMouseDown={() => act.select(pos)}
       onDragOver={(e) => { e.preventDefault(); if (!over) setOver(true) }}
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false) }}
-      onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files[0]; if (f) act.upload(clip, f) }}
+      onDrop={(e) => {
+        e.preventDefault(); setOver(false)
+        const files = [...e.dataTransfer.files]
+        if (files.length > 1) act.uploadMany(files)
+        else if (files[0]) act.upload(clip, files[0])
+      }}
     >
       <span className="c-num">{clip.index}</span>
       <span className="c-cue">
@@ -135,7 +140,7 @@ const Row = memo(function Row({ clip, pos, selected, playing, busy, recent, act 
         <span className={STATUS[status].cls}>{STATUS[status].label}</span>
         {clip.vf && (
           <label className="valid">
-            <input type="checkbox" checked={clip.valid} onChange={(e) => act.note(clip, { valid: e.target.checked })} />
+            <input type="checkbox" checked={clip.valid} onChange={(e) => { act.note(clip, { valid: e.target.checked }); e.target.blur() }} />
             <span className="box"><I.Check size={12} /></span>
             Testée en jeu
           </label>
@@ -232,7 +237,46 @@ function Reloaded({ state, onChange }) {
   )
 }
 
-function Settings({ state, onClose, onSave, onExtract, onReloaded }) {
+function Updates({ version, update, onCheck, onInstall }) {
+  const [busy, setBusy] = useState(false)
+  const [checked, setChecked] = useState(false)
+  const check = async () => {
+    setBusy(true)
+    await onCheck().catch(() => {})
+    setBusy(false)
+    setChecked(true)
+  }
+  let status = null
+  if (update?.available) {
+    status = (
+      <>
+        <span className="rl-warn">Version {update.latest} disponible</span>
+        <button className="btn btn-sm btn-primary" onClick={onInstall}><I.Download /> Installer</button>
+      </>
+    )
+  } else if (checked && update?.error) {
+    status = <span className="rl-warn">Impossible de vérifier pour l'instant (connexion internet, ou aucune version publiée).</span>
+  } else if (checked) {
+    status = <span className="rl-ok"><I.Check size={13} /> Tu as la dernière version</span>
+  }
+  return (
+    <div className="updates">
+      <div className="rl-line">
+        <span>Version installée : <b>{version}</b></span>
+        <button className="btn btn-sm" onClick={check} disabled={busy}>
+          {busy ? <span className="spin" /> : null} Vérifier les mises à jour
+        </button>
+      </div>
+      {status && <div className="rl-line">{status}</div>}
+      <p className="help">
+        Les nouvelles versions sont publiées sur <a href={update?.url || 'https://github.com/chenetulipe/P5R-FR-AUDIO-LAB/releases'} target="_blank" rel="noreferrer">GitHub</a>.
+        L'installation garde tes réglages, tes voix extraites et le mod.
+      </p>
+    </div>
+  )
+}
+
+function Settings({ state, onClose, onSave, onExtract, onReloaded, update, onCheckUpdate, onInstallUpdate }) {
   const [cfg, setCfg] = useState(state.config)
   const [extracting, setExtracting] = useState(false)
   const [leaving, setLeaving] = useState(false)
@@ -289,6 +333,9 @@ function Settings({ state, onClose, onSave, onExtract, onReloaded }) {
         <h3>Mod et Reloaded-II</h3>
         <Reloaded state={state} onChange={onReloaded} />
 
+        <h3>Mises à jour</h3>
+        <Updates version={state.version} update={update} onCheck={onCheckUpdate} onInstall={onInstallUpdate} />
+
         <h3>Dossiers</h3>
         {Field({ k: 'sound_dir', label: 'Voix extraites', help: 'Rempli tout seul après l\'extraction.' })}
         {Field({ k: 'rec_dir', label: 'Enregistrements VF', help: 'Pour l\'import groupé : fichiers nommés BP01_118.wav, ou rangés dans un sous-dossier BP01.' })}
@@ -310,7 +357,6 @@ function Settings({ state, onClose, onSave, onExtract, onReloaded }) {
           ))}
         </p>
         <div className="dialog-actions">
-          <span className="version">Version {state.version}</span>
           <button className="btn" onClick={close}>Annuler</button>
           <button className="btn btn-primary" onClick={() => onSave(cfg)}>Enregistrer</button>
         </div>
@@ -340,6 +386,9 @@ export default function App() {
   const [recent, setRecent] = useState([])
   const [toasts, setToasts] = useState([])
   const [settings, setSettings] = useState(false)
+  const [view, setView] = useState({ top: 0, h: 800 })
+  const [rowH, setRowH] = useState(51)
+  const [editName, setEditName] = useState(false)
   const [update, setUpdate] = useState(null)
   const [updating, setUpdating] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -409,8 +458,9 @@ export default function App() {
   useEffect(() => {
     if (!bank) { setClips([]); return }
     store('bank', bank)
-    setSel(0); setRecent([]); setQuery('')
-    listRef.current?.scrollTo({ top: 0 })
+    setSel(0); setRecent([]); setQuery(''); setEditName(false)
+    if (listRef.current) listRef.current.scrollTop = 0
+    setView((v) => ({ ...v, top: 0 }))
     const cached = clipCache.current.get(bank)
     if (cached) setClips(cached)
     else setLoading(true)
@@ -421,6 +471,47 @@ export default function App() {
       .finally(() => alive && setLoading(false))
     return () => { alive = false }
   }, [bank, fetchClips, toast])
+
+  // Une fois l'outil ouvert, on charge en arrière-plan la liste de chaque perso
+  const bankNames = banks.map((b) => b.bank).join(',')
+  useEffect(() => {
+    if (!bankNames) return
+    let stop = false
+    const t = setTimeout(async () => {
+      for (const b of bankNames.split(',')) {
+        if (stop) return
+        if (!clipCache.current.has(b)) await fetchClips(b).catch(() => {})
+      }
+    }, 800)
+    return () => { stop = true; clearTimeout(t) }
+  }, [bankNames, fetchClips])
+
+  // Liste virtuelle : seules les lignes visibles (et quelques-unes autour) sont dessinées
+  useEffect(() => {
+    const el = listRef.current
+    if (!el) return
+    const measure = () => {
+      setView({ top: el.scrollTop, h: el.clientHeight })
+      const r = el.querySelector('.row')
+      if (r && r.offsetHeight) setRowH(r.offsetHeight)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [loading])
+  useLayoutEffect(() => {
+    const r = listRef.current?.querySelector('.row')
+    if (r && r.offsetHeight && r.offsetHeight !== rowH) setRowH(r.offsetHeight)
+  })
+  const ensureVisible = (i) => {
+    const el = listRef.current
+    if (!el) return
+    const top = i * rowH
+    if (top < el.scrollTop) el.scrollTop = top
+    else if (top + rowH > el.scrollTop + el.clientHeight) el.scrollTop = top + rowH - el.clientHeight
+    setView({ top: el.scrollTop, h: el.clientHeight })
+  }
 
   // Glisser un fichier n'importe où : met en avant les zones de dépôt
   useEffect(() => {
@@ -517,19 +608,58 @@ export default function App() {
         })
       } catch (e) { toast(e.message, 'err') }
     },
+    uploadMany: async (files) => {
+      const names = banks.map((b) => b.bank.toUpperCase())
+      const plan = []
+      const unknown = []
+      for (const f of files) {
+        const stem = f.name.replace(/\.[^.]+$/, '').toUpperCase()
+        const owner = names.filter((n) => stem.startsWith(n)).sort((a, b) => b.length - a.length)[0]
+        const m = owner ? stem.slice(owner.length).match(/^[_\- #]*(\d+)/) : stem.match(/^(\d+)/)
+        if (m) plan.push({ bank: owner || bank, index: +m[1], file: f })
+        else unknown.push(f.name)
+      }
+      if (!plan.length) {
+        toast(`Aucun fichier reconnu. Nomme-les comme ${bank}_118.wav (perso puis numéro du clip).`, 'err')
+        return
+      }
+      toast(`Import de ${plan.length} fichier${plan.length > 1 ? 's' : ''}…`)
+      let ok = 0
+      const errors = []
+      for (const it of plan) {
+        if (it.bank === bank) setBusy((b) => ({ ...b, [it.index]: true }))
+        try {
+          const fd = new FormData()
+          fd.append('file', it.file)
+          const res = await api(`/banks/${it.bank}/clips/${it.index}/vf`, { method: 'POST', body: fd })
+          if (it.bank === bank) patchClip(it.index, { vf: res.file, vf_duration: res.vf_duration, valid: false, vfv: Date.now() })
+          ok++
+        } catch (e) { errors.push(`${it.file.name} : ${e.message}`) }
+        if (it.bank === bank) setBusy((b) => { const n = { ...b }; delete n[it.index]; return n })
+      }
+      audio.forget('/api/banks/')
+      plan.forEach((it) => clipCache.current.delete(it.bank))
+      loadBanks()
+      const extra = [unknown.length && `${unknown.length} nom${unknown.length > 1 ? 's' : ''} non reconnu${unknown.length > 1 ? 's' : ''}`,
+        errors.length && `${errors.length} en erreur`].filter(Boolean).join(', ')
+      toast(`${ok} VF posée${ok > 1 ? 's' : ''}${extra ? ` (${extra})` : ''}.`, errors.length || unknown.length ? 'err' : 'ok')
+    },
     note: (clip, patch) => {
       patchClip(clip.index, patch)
       api(`/banks/${bank}/clips/${clip.index}`, json('PATCH', patch)).catch((e) => toast(e.message, 'err'))
     },
   }
   const act = useMemo(() => Object.fromEntries(
-    ['select', 'prefetch', 'play', 'pick', 'reveal', 'upload', 'remove', 'note'].map((k) => [k, (...a) => live.current[k](...a)]),
+    ['select', 'prefetch', 'play', 'pick', 'reveal', 'upload', 'uploadMany', 'remove', 'note'].map((k) => [k, (...a) => live.current[k](...a)]),
   ), [])
 
-  // Précharge la VO de la ligne choisie et des deux suivantes
+  // Précharge la VO de la ligne choisie et de la suivante, une fois la sélection posée
   useEffect(() => {
-    if (!bank) return
-    for (let i = sel; i < Math.min(sel + 3, shown.length); i++) audio.load(voUrl(bank, shown[i].index)).catch(() => {})
+    if (!bank || !shown[sel]) return
+    const t = setTimeout(() => {
+      for (let i = sel; i < Math.min(sel + 2, shown.length); i++) audio.load(voUrl(bank, shown[i].index)).catch(() => {})
+    }, 160)
+    return () => clearTimeout(t)
   }, [sel, shown, bank])
 
   const setup = state?.setup
@@ -577,7 +707,9 @@ export default function App() {
 
   const saveSettings = async (cfg) => {
     try {
-      await api('/config', json('POST', cfg))
+      // Reloaded-II et le dossier du mod se règlent à part : ne pas renvoyer d'anciennes valeurs
+      const { reloaded_dir, mod_dir, ...rest } = cfg
+      await api('/config', json('POST', rest))
       await loadState()
       clipCache.current.clear()
       setSettings(false)
@@ -597,12 +729,14 @@ export default function App() {
     } catch (e) { toast(e.message, 'err'); return null }
   }
 
-  const rename = async () => {
-    const name = window.prompt(`Nom du personnage pour ${bank}`, current?.name)
-    if (!name?.trim()) return
-    await api('/config', json('POST', { names: { ...state.config.names, [bank]: name.trim() } }))
-    await loadState()
-    loadBanks()
+  const rename = async (name) => {
+    setEditName(false)
+    if (!name?.trim() || name.trim() === current?.name) return
+    try {
+      await api('/config', json('POST', { names: { ...state.config.names, [bank]: name.trim() } }))
+      await loadState()
+      loadBanks()
+    } catch (e) { toast(e.message, 'err') }
   }
 
   // Clavier : ↑ ↓ naviguer, Espace = VO, Maj + Espace = VF, Entrée = écrire la transcription
@@ -613,7 +747,7 @@ export default function App() {
         e.preventDefault()
         const next = Math.max(0, Math.min(shown.length - 1, sel + (e.key === 'ArrowDown' ? 1 : -1)))
         setSel(next)
-        requestAnimationFrame(() => listRef.current?.querySelector(`[data-pos="${next}"]`)?.scrollIntoView({ block: 'nearest' }))
+        ensureVisible(next)
       } else if (e.key === ' ' && shown[sel]) {
         e.preventDefault()
         const c = shown[sel]
@@ -626,7 +760,8 @@ export default function App() {
           { url: vfUrl(bank, c), meta: { key: `${bank}:${c.index}:vf`, kind: 'vf', title, text: c.text } })
       } else if (e.key === 'Enter' && shown[sel]) {
         e.preventDefault()
-        listRef.current?.querySelector(`[data-pos="${sel}"] .text`)?.focus()
+        ensureVisible(sel)
+        requestAnimationFrame(() => listRef.current?.querySelector(`[data-pos="${sel}"] .text`)?.focus())
       }
     }
     window.addEventListener('keydown', onKey)
@@ -719,9 +854,16 @@ export default function App() {
           <div className="head">
             <div>
               <h2 className="title">
-                {current.name}
+                {editName ? (
+                  <input className="name-edit" autoFocus defaultValue={current.name} aria-label="Nom du personnage"
+                    onBlur={(e) => rename(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') rename(e.currentTarget.value)
+                      if (e.key === 'Escape') setEditName(false)
+                    }} />
+                ) : current.name}
                 <span className="tag">{current.bank}</span>
-                <button className="link small" onClick={rename}>Renommer</button>
+                {!editName && <button className="link small" onClick={() => setEditName(true)}>Renommer</button>}
               </h2>
               <p className="muted">
                 {current.done} sur {current.count} répliques doublées ({pct(current.done, current.count)} %), {counts.valid} testée{counts.valid > 1 ? 's' : ''} en jeu
@@ -748,20 +890,32 @@ export default function App() {
           <div className="row row-head" role="row">
             <span className="c-num">N°</span><span>Cue</span><span>VO</span><span>Transcription</span><span>VF</span><span>Statut</span><span />
           </div>
-          <div className="rows" ref={listRef}>
+          <div className="rows" ref={listRef}
+            onScroll={(e) => { const el = e.currentTarget; setView({ top: el.scrollTop, h: el.clientHeight }) }}>
             {loading ? <Skeleton /> : shown.length === 0 ? (
               <p className="empty">{clips.length ? 'Aucune réplique pour ce filtre.' : 'Choisis un personnage.'}</p>
-            ) : shown.map((c, i) => {
-              const k = playingKey?.startsWith(`${bank}:${c.index}:`) ? playingKey.split(':')[2] : null
+            ) : (() => {
+              const start = Math.max(0, Math.floor(view.top / rowH) - 12)
+              const end = Math.min(shown.length, Math.ceil((view.top + view.h) / rowH) + 12)
               return (
-                <Row key={c.index} clip={c} pos={i} selected={i === sel} playing={k}
-                  busy={!!busy[c.index]} recent={recent.includes(c.index) && !!c.vf} act={act} />
+                <>
+                  <div style={{ height: start * rowH }} aria-hidden="true" />
+                  {shown.slice(start, end).map((c, k) => {
+                    const i = start + k
+                    const pk = playingKey?.startsWith(`${bank}:${c.index}:`) ? playingKey.split(':')[2] : null
+                    return (
+                      <Row key={c.index} clip={c} pos={i} selected={i === sel} playing={pk}
+                        busy={!!busy[c.index]} recent={recent.includes(c.index) && !!c.vf} act={act} />
+                    )
+                  })}
+                  <div style={{ height: (shown.length - end) * rowH }} aria-hidden="true" />
+                </>
               )
-            })}
+            })()}
           </div>
         </div>
         <p className="keys">
-          <kbd>↑</kbd><kbd>↓</kbd> naviguer <kbd>Espace</kbd> VO <kbd>Maj</kbd>+<kbd>Espace</kbd> VF <kbd>C</kbd> comparer VO puis VF <kbd>Entrée</kbd> transcrire
+          <kbd>↑</kbd><kbd>↓</kbd> naviguer <kbd>Espace</kbd> VO <kbd>Maj</kbd>+<kbd>Espace</kbd> VF <kbd>C</kbd> comparer VO puis VF <kbd>Entrée</kbd> transcrire. Glisse plusieurs fichiers nommés <code>BP01_118.wav</code> sur la liste pour tous les poser d'un coup.
         </p>
       </main>
 
@@ -771,7 +925,9 @@ export default function App() {
         onChange={(e) => { const f = e.target.files[0]; if (f && pickTarget.current) act.upload(pickTarget.current, f); e.target.value = '' }} />
 
       {settings && state && <Settings state={state} onClose={() => setSettings(false)} onSave={saveSettings} onExtract={extractGame}
-        onReloaded={(r) => setState((s) => ({ ...s, reloaded: r }))} />}
+        onReloaded={(r) => setState((s) => ({ ...s, reloaded: r }))}
+        update={update} onCheckUpdate={() => api('/update?force=true').then(setUpdate)}
+        onInstallUpdate={() => { setSettings(false); installUpdate() }} />}
 
       {updating && (
         <div className="backdrop">

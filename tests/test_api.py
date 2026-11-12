@@ -265,3 +265,79 @@ def test_corrupt_config_is_recovered():
 def test_update_check_never_crashes():
     r = client.get("/api/update")
     assert r.status_code == 200 and "current" in r.json()
+
+
+# ---------- v1.1 ----------
+
+def test_clips_payload_is_light():
+    c = client.get(f"/api/banks/{BANK}/clips").json()[0]
+    assert {"index", "name", "duration", "text", "vf", "valid"} <= set(c)
+    assert not {"offset", "size", "codec"} & set(c)
+
+
+def test_batch_does_not_mix_bp09_and_bp09_01():
+    rec = TMP / "rec_prefix"
+    rec.mkdir()
+    (rec / "BP09_01_5_Cue.wav").write_bytes(wav(0.3))   # clip 5 de BP09_01, pas le clip 1 de BP09
+    (rec / "BP09_7.wav").write_bytes(wav(0.3))
+    client.post("/api/config", json={"rec_dir": str(rec)})
+    r9 = client.post("/api/banks/BP09/batch").json()
+    assert [x["index"] for x in r9["imported"]] == [7]
+    r901 = client.post("/api/banks/BP09_01/batch").json()
+    assert [x["index"] for x in r901["imported"]] == [5]
+
+
+def test_parse_rec_name():
+    banks = ["BP01", "BP09", "BP09_01", "SPT01"]
+    P = Path
+    assert appmod.parse_rec_name(P("BP01_118_Cue3001.wav"), "BP01", banks) == 118
+    assert appmod.parse_rec_name(P("bp01-12.wav"), "BP01", banks) == 12
+    assert appmod.parse_rec_name(P("BP09_01_3.wav"), "BP09", banks) is None
+    assert appmod.parse_rec_name(P("BP01") / "44.wav", "BP01", banks) == 44
+    assert appmod.parse_rec_name(P("prise_finale.wav"), "BP01", banks) is None
+
+
+def test_updater_installs_new_version_and_keeps_user_files(monkeypatch):
+    """Simule une Release 9.9.9 : les fichiers de l'outil sont remplacés, data/mod/tools gardés."""
+    import updater
+    fake_root = TMP / "fake_install"
+    for d in ("server", "web/dist", "data", "mod", "tools"):
+        (fake_root / d).mkdir(parents=True)
+    (fake_root / "VERSION").write_text("1.0.0", "utf-8")
+    (fake_root / "server" / "app.py").write_text("# ancien", "utf-8")
+    (fake_root / "web" / "dist" / "vieux.js").write_text("x", "utf-8")
+    (fake_root / "data" / "config.json").write_text("{}", "utf-8")
+    (fake_root / "mod" / "garde.adx").write_text("x", "utf-8")
+    # Paquet GitHub simulé : un dossier racine, comme les zip de GitHub
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("chenetulipe-P5R-FR-AUDIO-LAB-abc123/VERSION", "9.9.9")
+        z.writestr("chenetulipe-P5R-FR-AUDIO-LAB-abc123/server/app.py", "# nouveau")
+        z.writestr("chenetulipe-P5R-FR-AUDIO-LAB-abc123/web/dist/index.html", "<html>")
+        z.writestr("chenetulipe-P5R-FR-AUDIO-LAB-abc123/data/config.json", "{\"piege\": 1}")
+        z.writestr("chenetulipe-P5R-FR-AUDIO-LAB-abc123/requirements.txt", "")
+    release = {"tag_name": "v9.9.9", "zipball_url": "zip://x", "body": "notes", "html_url": "u"}
+
+    def fake_get(url, timeout=15):
+        return buf.getvalue() if url == "zip://x" else json.dumps(release).encode()
+
+    monkeypatch.setattr(updater, "ROOT", fake_root)
+    monkeypatch.setattr(updater, "VERSION_FILE", fake_root / "VERSION")
+    monkeypatch.setattr(updater, "_get", fake_get)
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: None)
+    updater._cache.update(at=0.0, value=None)
+    info = updater.check(force=True)
+    assert info["available"] and info["latest"] == "9.9.9"
+    assert updater.apply() == {"installed": "9.9.9"}
+    assert (fake_root / "VERSION").read_text("utf-8") == "9.9.9"
+    assert (fake_root / "server" / "app.py").read_text("utf-8") == "# nouveau"
+    assert not (fake_root / "web" / "dist" / "vieux.js").exists()
+    assert (fake_root / "data" / "config.json").read_text("utf-8") == "{}"      # réglages gardés
+    assert (fake_root / "mod" / "garde.adx").exists()                           # mod gardé
+    updater._cache.update(at=0.0, value=None)
+
+
+def test_version_compare():
+    import updater
+    assert updater._parse("v1.10.0") > updater._parse("1.9.9")
+    assert updater._parse("1.1") == (1, 1, 0)

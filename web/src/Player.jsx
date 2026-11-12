@@ -18,6 +18,7 @@ export default function Player() {
   // Dessin de l'onde : tourne seulement pendant la lecture
   useEffect(() => {
     let raf
+    let colors = null
     const draw = () => {
       const c = canvas.current
       if (!c) return
@@ -29,9 +30,11 @@ export default function Player() {
       const g = c.getContext('2d')
       g.setTransform(dpr, 0, 0, dpr, 0, 0)
       g.clearRect(0, 0, W, H)
-      const css = getComputedStyle(c)
-      const played = css.getPropertyValue('--played').trim()
-      const rest = css.getPropertyValue('--rest').trim()
+      if (!colors) {
+        const css = getComputedStyle(c)
+        colors = { played: css.getPropertyValue('--played').trim(), rest: css.getPropertyValue('--rest').trim() }
+      }
+      const { played, rest } = colors
       const peaks = st.peaks
       const d = audio.duration()
       const p = d ? audio.position() / d : 0
